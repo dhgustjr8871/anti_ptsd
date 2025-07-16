@@ -1,31 +1,53 @@
 from flask import Flask, request, jsonify
-import google.generativeai as genai
-import os
+from transformers import BlipProcessor, BlipForConditionalGeneration
+from PIL import Image
+import requests
+import io
+import base64
+import torch
+from flask_cors import CORS
+# 한 번만 실행하면 됨
+# nltk.download("punkt")
+# nltk.download("stopwords")
 
-# Flask 서버 설정
 app = Flask(__name__)
+CORS(app)
 
-# Gemini API Key 설정 (환경변수나 직접 입력)
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyA6ecOZBW_QUuPjpS_yQnY2HcYaj68yqPs")
-genai.configure(api_key=GEMINI_API_KEY)
+# 모델과 프로세서 로드
+processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base", use_fast=True)
+model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"💻 Using device: {device}")
+model.to(device)
 
-# Gemini 모델 불러오기
-model = genai.GenerativeModel('gemini-2.5-flash-lite-preview-06-17')
+# 이미지 열기 함수
+def load_image(data):
+    if "url" in data:
+        return Image.open(requests.get(data["url"], stream=True).raw).convert("RGB")
+    elif "base64" in data:
+        image_data = base64.b64decode(data["base64"])
+        return Image.open(io.BytesIO(image_data)).convert("RGB")
+    else:
+        raise ValueError("No valid image source provided.")
 
-@app.route("/chat", methods=["POST"])
-def chat():
+@app.route("/blip", methods=["POST"])
+def blip_caption():
     try:
-        user_input = request.json.get("message")
-        if not user_input:
-            return jsonify({"error": "No input message provided"}), 400
+        # JSON 파싱 예외 방지
+        if request.is_json:
+            data = request.get_json()
+        else:
+            return jsonify({"error": "Request is not JSON"}), 400
 
-        response = model.generate_content(user_input)
-        return jsonify({
-            "response": response.text
-        })
-
+        image = load_image(data)
+        print("✅ 이미지 shape:", image.size) 
+        inputs = processor(image, return_tensors="pt").to(device)
+        with torch.no_grad():
+            out = model.generate(**inputs, max_new_tokens=20)
+        caption = processor.decode(out[0], skip_special_tokens=True)
+        return jsonify({"caption": caption})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
+        return jsonify({"error": str(e)}), 400
+    
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
